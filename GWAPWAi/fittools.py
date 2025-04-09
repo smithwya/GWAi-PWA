@@ -37,7 +37,7 @@ def pack_parameters(observ_dict, wave="P"):
             chunk = flat_vector[idx:idx+size].reshape(shape)
             restored.append(chunk)
             idx += size
-        return restored  # chebys, pole_couplings, pole_masses, kbkgrd
+        return restored  # order: chebys, pole_couplings, pole_masses, kbkgrd
 
     static_params = {
         "J": wave_data["J"],
