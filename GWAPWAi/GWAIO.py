@@ -334,32 +334,123 @@ def reorganize_instructions(instr):
     return data
 
 
-def load_experimental_data(config):
+def load_data(config):
     exp_data = {}
 
     for wave, wdata in config.get("wave_data", {}).items():
-        wave_block = {
-            "channels": {},
-            "inclusive": None
-        }
+        wave_block = {}
         files = wdata.get("LoadExpData", {})
+        all_channels = config.get("channels", {}).get("names", [])
 
-        for name, fname in files.items():
+        # Process inclusive data
+        inclusive_data = None
+        if "inclusive" in files:
+            try:
+                data_np = np.loadtxt(files["inclusive"])
+                tensor = torch.tensor(data_np, dtype=torch.float64)
+                sqrt_s = tensor[:, 0]
+                value = tensor[:, 1]
+                total_err = tensor[:, 2]  # use only stat error
+                wave_block["inclusive"] = torch.stack([sqrt_s, value, total_err], dim=1)
+            except Exception as e:
+                print(f"Warning: Failed to load inclusive data from '{files['inclusive']}': {e}")
+                wave_block["inclusive"] = None
+
+        # Process exclusive channels
+        channel_block = {}
+        for ch in all_channels:
+            if ch not in files:
+                continue  # skip dummy or unused channels
+
+            fname = files[ch]
             try:
                 data_np = np.loadtxt(fname)
                 tensor = torch.tensor(data_np, dtype=torch.float64)
-                if name == "inclusive":
-                    wave_block["inclusive"] = tensor
-                else:
-                    wave_block["channels"][name] = tensor
+                sqrt_s = tensor[:, 0]
+                value = tensor[:, 1]
+                stat_err = tensor[:, 2]
+                sys_err = tensor[:, 3]
+                total_err = torch.sqrt(stat_err**2 + sys_err**2)
+                channel_block[ch] = torch.stack([sqrt_s, value, total_err], dim=1)
             except Exception as e:
-                print(f"Warning: Failed to load '{fname}' for wave '{wave}', name '{name}': {e}")
-                if name == "inclusive":
-                    wave_block["inclusive"] = None
-                else:
-                    wave_block["channels"][name] = None
+                print(f"Warning: Failed to load '{fname}' for channel '{ch}' in wave '{wave}': {e}")
+                channel_block[ch] = None
 
+        wave_block["channels"] = channel_block
         exp_data[wave] = wave_block
 
     return exp_data
 
+def prepare_data(exp_data, static_params, wave="P"):
+    wave_data = exp_data[wave]
+    smin = static_params["smin"]
+    smax = static_params["smax"]
+
+    sqrt_s_values = []
+    data_list = []
+    channel_list = []
+
+    for ch, tensor in wave_data["channels"].items():
+        if tensor is not None:
+            sqrt_s_values.append(tensor[:, 0])
+            data_list.append((ch, tensor[:, 0], tensor[:, 1], tensor[:, 2]))
+            channel_list.append(ch)
+
+    if wave_data.get("inclusive") is not None:
+        tensor = wave_data["inclusive"]
+        sqrt_s_values.append(tensor[:, 0])
+        data_list.append(("inclusive", tensor[:, 0], tensor[:, 1], tensor[:, 2]))
+        channel_list.append("inclusive")
+
+    sqrt_s_all = torch.cat(sqrt_s_values)
+    sqrt_s_unique, _ = torch.sort(torch.unique(sqrt_s_all))
+    num_pts = sqrt_s_unique.shape[0]
+    num_ch = len(data_list)
+
+    values = torch.zeros(num_pts, num_ch, dtype=torch.float64)
+    errors = torch.zeros_like(values)
+    masks = torch.zeros_like(values, dtype=torch.bool)
+
+    # Mask for global fit region
+    fit_region_mask = (sqrt_s_unique >= smin) & (sqrt_s_unique <= smax)
+
+    for i, (ch, s, v, e) in enumerate(data_list):
+        mask = torch.isin(sqrt_s_unique, s)
+        mask = mask & fit_region_mask  # restrict to [smin, smax]
+        masks[:, i] = mask
+        values[mask, i] = v[torch.isin(s, sqrt_s_unique[mask])]
+        errors[mask, i] = e[torch.isin(s, sqrt_s_unique[mask])]
+
+    model_channel_indices = torch.tensor(
+        [static_params["channel_names"].index(ch) if ch != "inclusive" else -1 for ch in channel_list],
+        dtype=torch.long
+    )
+
+    return sqrt_s_unique, values, errors, masks, channel_list, model_channel_indices
+
+
+def update_dict(observ_dict, wave, flat_params, unpack_fn):
+    """
+    Inserts fitted parameters back into the observable dictionary structure.
+
+    Parameters:
+        observ_dict : dict
+            The original dictionary from input file.
+        wave : str
+            The partial wave being updated (e.g., "P").
+        flat_params : Tensor
+            The best-fit flat parameter vector.
+        unpack_fn : function
+            The function that unpacks flat_params into (chebys, couplings, poles, kbkgrd).
+    """
+    chebys, couplings, poles, kbkgrd = unpack_fn(flat_params)
+
+    # Insert updated values back into the dictionary
+    wave_data = observ_dict["wave_data"][wave]
+
+    wave_data["ChebyCoeffs"]["coeffs"] = chebys.clone().detach()
+    wave_data["Poles"]["mass"] = poles.clone().detach()
+    wave_data["Poles"]["couplings"] = couplings.clone().detach()
+    wave_data["KmatBackground"] = kbkgrd.clone().detach()
+
+    return observ_dict

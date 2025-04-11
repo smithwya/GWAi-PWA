@@ -9,10 +9,12 @@ import math
 
 def threshold(masses: torch.Tensor):
     return masses.sum(dim=1)**2
-def momentum(s: torch.Tensor, masses: torch.Tensor):
-    s = torch.atleast_1d(s)           # s becomes shape (N,) even if it was scalar.
-    masses = torch.atleast_2d(masses)
-    return 0.5*torch.sqrt(s.unsqueeze(1)-masses.sum(dim=1).unsqueeze(0)**2)
+def momentum(s: torch.Tensor, masses: torch.Tensor) -> torch.Tensor:
+    s = torch.atleast_1d(s).to(dtype=torch.cdouble)
+    masses = torch.atleast_2d(masses).to(dtype=torch.cdouble)
+    threshold_sq = masses.sum(dim=1)**2  # shape (M,)
+    return 0.5 * torch.sqrt(s[:, None] - threshold_sq[None, :])
+
 def true_momentum(s:torch.Tensor,masses:torch.Tensor):
     s = torch.atleast_1d(s)           # s becomes shape (N,) even if it was scalar.
     masses = torch.atleast_2d(masses)
@@ -175,7 +177,7 @@ def integrate_rhoN(s: torch.Tensor,
     
     # Expand the x-values for integration: sprime_grid from (num_integ, M) to (num_integ, 1, M)
     x_vals = t.unsqueeze(1).unsqueeze(2)              # shape: (num_integ, 1, M)
-    I_integrated = torch.trapz(integrand, x=x_vals, dim=0)  # shape: (N, M)
+    I_integrated = torch.trapezoid(integrand, x=x_vals, dim=0)  # shape: (N, M)
     
     return I_integrated
 
@@ -274,7 +276,7 @@ def get_true_momentum(s: torch.Tensor, masses: torch.Tensor) -> torch.Tensor:
     """
     # Ensure s is at least 1D and masses is a tensor.
     s = torch.atleast_1d(s)
-    masses = torch.as_tensor(masses, dtype=torch.cdouble)
+    masses = torch.as_tensor(masses, dtype=torch.cdouble, device=s.device)
     
     m_sum = masses[0] + masses[1]
     m_diff = masses[0] - masses[1]
@@ -289,24 +291,55 @@ def get_true_momentum(s: torch.Tensor, masses: torch.Tensor) -> torch.Tensor:
     return 0.5 * num / s
 
 
-def construct_phsp(s: torch.Tensor, masses_phsp: torch.Tensor, J: float) -> torch.Tensor:
-    # Determine number of channels M.
-    M = masses_phsp.shape[0]
-    phsp_list = []
-    for m in range(M):
-        # get_true_momentum should be vectorized in s.
-        ph = get_true_momentum(s, masses_phsp[m])  # shape: (K,)
-        # Compute the phase-space factor (raised to (J+0.5) and divided by s^(0.25)).
-        ph = ph**(J+0.5) / s.pow(0.25)
-        phsp_list.append(ph)
-    # Stack over channels to get a (K, M) tensor.
-    phsp = torch.stack(phsp_list, dim=1)  # shape: (K, M)
-    # Make each row into a diagonal matrix.
-    phsp_diag = torch.diag_embed(phsp)     # shape: (K, M, M)
-    return phsp_diag
+def safe_power(x: torch.Tensor, power: float, eps: float = 1e-12) -> torch.Tensor:
+    """
+    Computes x**power with gradient stability near |x| ~ 0.
+    Prevents nan or inf in PowBackward0 during autograd.
+
+    Parameters:
+        x     : Tensor (real or complex)
+        power : Exponent (float)
+        eps   : Stability cutoff
+
+    Returns:
+        Tensor of x ** power with safe handling near zero
+    """
+    x_mag = torch.abs(x)
+    x_safe = torch.where(x_mag < eps, x.new_full(x.shape, eps, dtype=x.dtype), x)
+    return x_safe ** power
+
+def construct_phsp(s: torch.Tensor, masses: torch.Tensor, J: float) -> torch.Tensor:
+    """
+    Computes diagonalized phase-space factors safely for all channels.
+
+    Parameters:
+        s       : Tensor of shape (N,), complex dtype
+        masses  : Tensor of shape (M, 2), real or complex
+        J       : Angular momentum
+
+    Returns:
+        Tensor of shape (N, M, M) — diagonal matrix per point
+    """
+    s = s.view(-1).to(dtype=torch.cdouble)
+    masses = masses.to(dtype=torch.cdouble)
+
+    m1 = masses[:, 0]
+    m2 = masses[:, 1]
+
+    m_sum_sq = (m1 + m2) ** 2
+    m_diff_sq = (m1 - m2) ** 2
+
+    s_exp = s[:, None]  # (N, 1)
+
+    k_squared = (s_exp - m_sum_sq) * (s_exp - m_diff_sq)
+    k = torch.sqrt(k_squared + 0j) / (2 * s_exp + 0j)  # safe sqrt
+
+    phsp = safe_power(k, J + 0.5) / safe_power(s_exp, 0.25)
+    return torch.diag_embed(phsp)
 
 
-def precompute_II(s, static_params, integrate_rhoN_func, rhoN_dispatcher, momentum_func, sheet = 0, epsilon = 0.003, num_integ = 10000):
+
+def precompute_II(s, static_params, integrate_rhoN_func, rhoN_dispatcher, momentum_func, sheet = 0, epsilon = 0.003, num_integ = 100000):
     J = static_params["J"]
     alpha = static_params["alpha"]
     sL = static_params["sL"]
@@ -335,10 +368,16 @@ def compute_intensity(s, flat_params, unpack_fn, static_params,
 
     num_pts = s.shape[0]
     identity = torch.eye(num_ch, dtype=s.dtype, device=s.device).expand(num_pts, num_ch, num_ch)
-    denom_inv = (identity - kmat @ II).inverse() @ kmat
+
+    #regularize the denom
+    reg = 1e-6 * torch.eye(kmat.shape[-1], dtype=kmat.dtype, device=kmat.device).expand_as(kmat)
+    denom_inv = (identity - kmat @ II + reg).inverse() @ kmat
+
+    #denom_inv = (identity - kmat @ II).inverse() @ kmat
 
     val = (N @ denom_inv @ phsp).squeeze(1)
     intensity = (val * torch.conj(val)).real
+
     return intensity
 
 
@@ -346,4 +385,5 @@ def compute_intensity(s, flat_params, unpack_fn, static_params,
 rhoN_dispatcher = {
     "rhoN-nominal": rhoNnominal
 }
+
 
