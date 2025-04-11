@@ -158,7 +158,7 @@ def run_fit(
             optimizer.zero_grad()
             loss = model()
             if torch.isnan(loss):
-                print("❌ NaN encountered during Adam")
+                print("NaN encountered during Adam")
                 break
             loss.backward()
             optimizer.step()
