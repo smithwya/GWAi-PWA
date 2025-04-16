@@ -236,6 +236,7 @@ def integrate_rhoN_scp(s: torch.Tensor,
         for m_idx in range(M_channels):
             L_val = lower_limits[m_idx].item()
             # Define the integrand as a function of t (a scalar float).
+            
             def integrand(t):
                 # Transformation: s' = L + t/(1-t)
                 sprime = L_val + t/(1-t)
