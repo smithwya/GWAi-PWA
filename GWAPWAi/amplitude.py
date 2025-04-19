@@ -230,18 +230,31 @@ def integrate_rhoN_scp(s: torch.Tensor,
     
     # Loop over each energy value.
     for s_val in s:
-        s_val_float = s_val.item()
+        s_val_float = s_val.item()# may be complex
         channel_vals = []
         # Loop over channels.
         for m_idx in range(M_channels):
             L_val = lower_limits[m_idx].item()
             # Define the integrand as a function of t (a scalar float).
             
+            s_val_tensor = torch.tensor([np.real(s_val_float)], dtype=torch.float64, device=s.device)
+            F_full_ext = rhoN(s_val_tensor, masses, momenta, J, alpha, sL, sheet)
+            F_val_ext = F_full_ext[0, m_idx].item()  # may be complex
+            
+            def altern_integrand(t):
+                sprime = L_val + t/(1-t)
+                sprime_tensor = torch.tensor([sprime], dtype=torch.float64)
+                F_full = rhoN(sprime_tensor, masses, momenta, J, alpha, sL, sheet)
+                F_val = F_full[0, m_idx].item()  # may be complex
+
+                jac = 1.0/(1-t)**2
+                return (F_val - np.real(F_val_ext)) / (sprime * (sprime - np.real(s_val_float))) * jac
+            
             def integrand(t):
                 # Transformation: s' = L + t/(1-t)
                 sprime = L_val + t/(1-t)
                 # Convert sprime to a one-element torch tensor (float64) for rhoN.
-                sprime_tensor = torch.tensor([sprime], dtype=torch.float64)
+                sprime_tensor = torch.tensor([sprime], dtype=torch.float64, device=s.device)
                 # Call the passed-in rhoN function.
                 # It should return a tensor of shape (1, M). We extract the value for channel m_idx.
                 F_full = rhoN(sprime_tensor, masses, momenta, J, alpha, sL, sheet)
@@ -250,14 +263,24 @@ def integrate_rhoN_scp(s: torch.Tensor,
                 jac = 1.0/(1-t)**2
                 return F_val / (sprime * (sprime - s_val_float - 1j*epsilon)) * jac
             
-            # Integrate the real part.
-            real_int, real_err = quad(lambda t: np.real(integrand(t)),
-                                      0, t_max, limit=num_integ, epsabs=1e-12)
-            # Integrate the imaginary part.
-            imag_int, imag_err = quad(lambda t: np.imag(integrand(t)),
-                                      0, t_max, limit=num_integ, epsabs=1e-12)
-            # Combine and multiply by the overall factor s/π.
-            I_val = (s_val_float/math.pi) * (real_int + 1j*imag_int)
+            # Integrate the real part.#
+            if abs(np.imag(s_val)) < 2. * epsilon:
+                real_int, real_err = quad(lambda t: np.real(altern_integrand(t)),
+                                          0, t_max, limit=num_integ, epsabs=1e-12)
+                imag_int, imag_err = quad(lambda t: np.imag(altern_integrand(t)),
+                                          0, t_max, limit=num_integ, epsabs=1e-12)
+                I_val = (np.real(s_val_float)/math.pi) * (real_int + 1j*imag_int) + np.real(F_val_ext) * np.log(L_val/(abs(np.real(s_val_float) - L_val)))/math.pi
+                #print(L_val, np.real(s_val_float), np.log(L_val/(abs(np.real(s_val_float) - L_val))))
+                if np.real(s_val_float) > L_val:
+                    I_val += 1j*np.real(F_val_ext)
+            else:
+                real_int, real_err = quad(lambda t: np.real(integrand(t)),
+                                          0, t_max, limit=num_integ, epsabs=1e-12)
+                # Integrate the imaginary part.
+                imag_int, imag_err = quad(lambda t: np.imag(integrand(t)),
+                                          0, t_max, limit=num_integ, epsabs=1e-12)
+                # Combine and multiply by the overall factor s/π.
+                I_val = (s_val_float/math.pi) * (real_int + 1j*imag_int)
             channel_vals.append(I_val)
         results.append(channel_vals)
     

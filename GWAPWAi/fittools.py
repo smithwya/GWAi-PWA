@@ -150,7 +150,9 @@ def run_fit(
 
         # Randomize starting point near initial
         noise = torch.randn_like(initial_params) * 0.1
+        #print(noise.device)
         model.params.data = initial_params.clone().detach() + noise
+        #print(model.params.data)
 
         # === Adam: global search ===
         optimizer = torch.optim.Adam([model.params], lr=adam_lr)
@@ -271,7 +273,7 @@ def plot_fit_vs_data_full(
         K_nominal_func=model.K_nominal_func,
         momentum_func=model.momentum_func
     ).real
-
+    
     s_np = (sqrt_s_grid).detach().cpu().numpy().real
     intensity_np = intensity.detach().cpu().numpy()
     values_np = values.detach().cpu().numpy()
