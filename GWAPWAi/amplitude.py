@@ -404,6 +404,35 @@ def compute_intensity(s, flat_params, unpack_fn, static_params,
 
     return intensity
 
+def compute_comp_amp(s, flat_params, unpack_fn, static_params,
+                      II,
+                      numerator_func, omega_pole_func, 
+                      construct_phsp_func, K_nominal_func, 
+                      momentum_func):
+    chebys, pole_couplings, pole_masses, kbkgrd = unpack_fn(flat_params)
+
+    J = static_params["J"]
+    s0 = static_params["s0"]
+    masses = static_params["masses"]
+    num_ch = static_params["num_ch"]
+
+    N = numerator_func(omega_pole_func(s, s0), chebys).unsqueeze(1).to(torch.cdouble)
+    phsp = construct_phsp_func(s, masses, J).to(torch.cdouble)
+    kmat = K_nominal_func(s, pole_couplings, pole_masses, kbkgrd)
+
+    num_pts = s.shape[0]
+    identity = torch.eye(num_ch, dtype=s.dtype, device=s.device).expand(num_pts, num_ch, num_ch)
+
+    #regularize the denom
+    reg = 1e-6 * torch.eye(kmat.shape[-1], dtype=kmat.dtype, device=kmat.device).expand_as(kmat)
+    denom_inv = (identity - kmat @ II + reg).inverse() @ kmat
+
+    #denom_inv = (identity - kmat @ II).inverse() @ kmat
+
+    val = (N @ denom_inv @ phsp).squeeze(1)
+
+    return val
+
 
 # Dispatcher map defined once and shared
 rhoN_dispatcher = {

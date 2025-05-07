@@ -365,3 +365,76 @@ def plot_fit_vs_data_full(
     plt.tight_layout(rect=[0, 0, 1, 0.98])
     print(f"Total χ² (summed across all data channels): {chi2_total:.2f}")
     plt.show()
+
+
+import torch
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D  # Necessario per il plotting 3D
+
+def plot_complex_tensor_columns(x: torch.Tensor, y: torch.Tensor, labels=None):
+    """
+    Plotta ciascuna colonna di un tensore complesso y (shape: [N, C]) rispetto a un tensore complesso x (shape: [N]).
+    Il grafico è un plot 3D con assi:
+        - asse x: Re(x)
+        - asse y: Im(x)
+        - asse z: |y|
+    I punti sono colorati in base alla fase di y.
+    
+    Args:
+        x (torch.Tensor): Tensore complesso 1D di shape [N].
+        y (torch.Tensor): Tensore complesso 2D di shape [N, C].
+        labels (list of str, optional): Etichette per ciascuna colonna. Se None,
+            le colonne saranno etichettate come 'Colonna 1', 'Colonna 2', ..., 'Colonna C'.
+    """
+    # Assicurati che i tensori siano su CPU e staccati dal grafo computazionale
+    x = x.detach().cpu()
+    y = y.detach().cpu()
+    
+    # Validazione delle shape dei tensori
+    if x.ndim != 1 or y.ndim != 2:
+        raise ValueError("x deve essere un tensore 1D e y deve essere un tensore 2D.")
+    if x.shape[0] != y.shape[0]:
+        raise ValueError("x e y devono avere lo stesso numero di righe.")
+    if not torch.is_complex(x):# or not torch.is_complex(y):
+        raise ValueError("x deve essere tensori complessi.")
+    
+    N, C = y.shape
+
+    # Preparazione delle etichette
+    if labels is not None:
+        if len(labels) != C:
+            raise ValueError(f"Il numero di etichette ({len(labels)}) non corrisponde al numero di colonne in y ({C}).")
+    else:
+        labels = [f'Colonna {i+1}' for i in range(C)]
+    
+    # Estrazione delle parti reali e immaginarie di x
+    x_real = x.real.numpy()
+    x_imag = x.imag.numpy()
+    
+    # Creazione dei plot 3D per ciascuna colonna in y
+    for i in range(C):
+        y_abs = y[:, i].abs().numpy()
+        y_phase = torch.angle(y[:, i]).numpy()  # Fase di y in radianti
+        
+        fig = plt.figure(figsize=(10, 6))
+        ax = fig.add_subplot(111, projection='3d')
+        scatter = ax.scatter(x_real, x_imag, y_abs, c=y_phase, cmap='hsv', s=20)
+        
+        ax.set_xlabel('Re(x)')
+        ax.set_ylabel('Im(x)')
+        ax.set_zlabel(f'|{labels[i]}|')
+        ax.set_title(f'3D Plot: Re(x), Im(x), |{labels[i]}| con colore basato sulla fase')
+        
+        cbar = fig.colorbar(scatter, ax=ax, label='Fase di y (radiani)')
+        cbar.set_ticks([-torch.pi, -torch.pi/2, 0, torch.pi/2, torch.pi])
+        cbar.set_ticklabels([r'$-\pi$', r'$-\pi/2$', '0', r'$\pi/2$', r'$\pi$'])
+        
+        plt.tight_layout()
+        plt.show()
+
+
+
+
+
+
+
